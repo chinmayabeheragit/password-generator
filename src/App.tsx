@@ -8,56 +8,25 @@ type Options = {
 };
 
 type HistoryItem = {
-  id: string;
+  _id: string;
   password: string;
   strength: string;
-  timestamp: string;
   responseTime: number;
+  length: number;
+  options: Options;
+  createdAt: string;
 };
 
-const CHARSETS = {
-  upper: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-  lower: "abcdefghijklmnopqrstuvwxyz",
-  numbers: "0123456789",
-  symbols: "!@#$%^&*()_+-=[]{}<>?"
+type Stats = {
+  totalGenerated: number;
+  generatedToday: number;
+  generatedThisWeek: number;
+  averageLength: number;
+  averageResponseTime: number;
+  strengthDistribution: Array<{ _id: string; count: number }>;
 };
 
-const evaluateStrength = (pw: string, poolSize: number) => {
-  const entropy = pw.length * Math.log2(poolSize);
-
-  if (entropy < 40) return "Weak";
-  else if (entropy < 60) return "Medium";
-  else return "Strong";
-};
-
-const generatePasswordFromOptions = (length: number, options: Options) => {
-  const startTime = performance.now();
-  
-  let pool = "";
-
-  if (options.upper) pool += CHARSETS.upper;
-  if (options.lower) pool += CHARSETS.lower;
-  if (options.numbers) pool += CHARSETS.numbers;
-  if (options.symbols) pool += CHARSETS.symbols;
-
-  if (!pool) {
-    return { password: "", strength: "", responseTime: 0 };
-  }
-
-  let result = "";
-  for (let i = 0; i < length; i++) {
-    result += pool[Math.floor(Math.random() * pool.length)];
-  }
-
-  const endTime = performance.now();
-  const responseTime = endTime - startTime;
-
-  return {
-    password: result,
-    strength: evaluateStrength(result, pool.length),
-    responseTime
-  };
-};
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 export default function App() {
   const [length, setLength] = useState<number>(12);
@@ -72,66 +41,167 @@ export default function App() {
   const [copied, setCopied] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string>("");
 
-  // Generate initial password on mount
+  // Generate password from backend API
+  const generatePassword = async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const response = await fetch(`${API_URL}/passwords/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          length,
+          options,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to generate password');
+      }
+
+      const result = await response.json();
+      
+      if (result.success) {
+        setPassword(result.data.password);
+        setStrength(result.data.strength);
+        
+        // Refresh history and stats
+        await Promise.all([fetchHistory(), fetchStats()]);
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to generate password';
+      setError(errorMessage);
+      console.error('Error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch history from backend
+  const fetchHistory = async () => {
+    try {
+      const response = await fetch(`${API_URL}/passwords/history?limit=20`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch history');
+      }
+
+      const result = await response.json();
+      
+      if (result.success) {
+        setHistory(result.data);
+      }
+    } catch (err) {
+      console.error('Error fetching history:', err);
+    }
+  };
+
+  // Fetch statistics from backend
+  const fetchStats = async () => {
+    try {
+      const response = await fetch(`${API_URL}/passwords/stats`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch stats');
+      }
+
+      const result = await response.json();
+      
+      if (result.success) {
+        setStats(result.data);
+      }
+    } catch (err) {
+      console.error('Error fetching stats:', err);
+    }
+  };
+
+  // Clear history from backend
+  const clearHistory = async () => {
+    if (!window.confirm('Are you sure you want to clear all history?')) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/passwords/history`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to clear history');
+      }
+
+      const result = await response.json();
+      
+      if (result.success) {
+        setHistory([]);
+        await fetchStats();
+      }
+    } catch (err) {
+      console.error('Error clearing history:', err);
+      alert('Failed to clear history');
+    }
+  };
+
+  // Delete individual password
+  const deletePassword = async (id: string) => {
+    try {
+      const response = await fetch(`${API_URL}/passwords/${id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete password');
+      }
+
+      // Refresh history and stats
+      await Promise.all([fetchHistory(), fetchStats()]);
+    } catch (err) {
+      console.error('Error deleting password:', err);
+      alert('Failed to delete password');
+    }
+  };
+
+  // Initial load
   useEffect(() => {
-    const { password: pwd, strength: str, responseTime } = generatePasswordFromOptions(length, options);
-    setPassword(pwd);
-    setStrength(str);
-    
-    // Add to history
-    addToHistory(pwd, str, responseTime);
+    generatePassword();
+    fetchStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run once on mount
+  }, []);
 
-  const addToHistory = (pwd: string, str: string, responseTime: number) => {
-    const newItem: HistoryItem = {
-      id: Date.now().toString(),
-      password: pwd,
-      strength: str,
-      timestamp: new Date().toLocaleTimeString(),
-      responseTime: Math.round(responseTime * 100) / 100
-    };
-    
-    setHistory(prev => [newItem, ...prev].slice(0, 20)); // Keep last 20 items
-  };
-
-  const generatePassword = () => {
-    const { password: pwd, strength: str, responseTime } = generatePasswordFromOptions(length, options);
-    setPassword(pwd);
-    setStrength(str);
-    addToHistory(pwd, str, responseTime);
-  };
-
-  const toggleOption = (key: keyof Options) => {
+  // Auto-regenerate when options or length change
+  const handleOptionsChange = async (key: keyof Options) => {
     const newOptions = { ...options, [key]: !options[key] };
     setOptions(newOptions);
-    
-    // Generate new password with updated options
-    const { password: pwd, strength: str, responseTime } = generatePasswordFromOptions(length, newOptions);
-    setPassword(pwd);
-    setStrength(str);
-    addToHistory(pwd, str, responseTime);
   };
 
   const handleLengthChange = (newLength: number) => {
     setLength(newLength);
-    
-    // Generate new password with updated length
-    const { password: pwd, strength: str, responseTime } = generatePasswordFromOptions(newLength, options);
-    setPassword(pwd);
-    setStrength(str);
-    addToHistory(pwd, str, responseTime);
   };
 
   const copyToClipboard = async (text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+      alert('Failed to copy to clipboard');
+    }
   };
 
-  const clearHistory = () => {
-    setHistory([]);
+  const toggleHistory = () => {
+    if (!showHistory) {
+      fetchHistory();
+    }
+    setShowHistory(!showHistory);
   };
 
   return (
@@ -139,16 +209,81 @@ export default function App() {
       <div className="container">
         <h1>🔐 Password Generator</h1>
 
+        {error && (
+          <div className="error-message">
+            ⚠️ {error}
+          </div>
+        )}
+
         <div className="password-display">
-          <input className="password" value={password} readOnly />
-          <button className="copy-btn" onClick={() => copyToClipboard(password)}>
+          <input 
+            className="password" 
+            value={password} 
+            readOnly 
+            placeholder={loading ? "Generating..." : "Your password will appear here"}
+          />
+          <button 
+            className="copy-btn" 
+            onClick={() => copyToClipboard(password)}
+            disabled={!password || loading}
+          >
             {copied ? "✓ Copied!" : "📋 Copy"}
           </button>
         </div>
 
-        <p className={`strength ${strength.toLowerCase()}`}>
-          Strength: {strength}
-        </p>
+        {strength && (
+          <p className={`strength ${strength.toLowerCase()}`}>
+            Strength: {strength}
+          </p>
+        )}
+
+        {stats && (
+          <div className="stats-card">
+            <h3>📊 Statistics</h3>
+            <div className="stats-grid">
+              <div className="stat-item">
+                <span className="stat-label">Total Generated</span>
+                <span className="stat-value">{stats.totalGenerated}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Today</span>
+                <span className="stat-value">{stats.generatedToday}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">This Week</span>
+                <span className="stat-value">{stats.generatedThisWeek}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Avg Length</span>
+                <span className="stat-value">{stats.averageLength.toFixed(1)}</span>
+              </div>
+            </div>
+            
+            {stats.strengthDistribution.length > 0 && (
+              <div className="strength-distribution">
+                <h4>Strength Distribution</h4>
+                <div className="strength-bars">
+                  {stats.strengthDistribution.map((item) => (
+                    <div key={item._id} className="strength-bar-item">
+                      <span className={`strength-label ${item._id.toLowerCase()}`}>
+                        {item._id}
+                      </span>
+                      <div className="strength-bar-container">
+                        <div 
+                          className={`strength-bar ${item._id.toLowerCase()}`}
+                          style={{ 
+                            width: `${(item.count / stats.totalGenerated) * 100}%` 
+                          }}
+                        />
+                      </div>
+                      <span className="strength-count">{item.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         <label className="length-label">
           Length: {length}
@@ -158,6 +293,7 @@ export default function App() {
             max={64}
             value={length}
             onChange={e => handleLengthChange(Number(e.target.value))}
+            disabled={loading}
           />
         </label>
 
@@ -167,18 +303,27 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={options[key as keyof Options]}
-                onChange={() => toggleOption(key as keyof Options)}
+                onChange={() => handleOptionsChange(key as keyof Options)}
+                disabled={loading}
               />
               {key.charAt(0).toUpperCase() + key.slice(1)}
             </label>
           ))}
         </div>
         
-        <button className="regenerate-btn" onClick={generatePassword}>
-          🔄 Regenerate Password
+        <button 
+          className="regenerate-btn" 
+          onClick={generatePassword}
+          disabled={loading}
+        >
+          {loading ? "🔄 Generating..." : "🔄 Regenerate Password"}
         </button>
 
-        <button className="history-toggle" onClick={() => setShowHistory(!showHistory)}>
+        <button 
+          className="history-toggle" 
+          onClick={toggleHistory}
+          disabled={loading}
+        >
           {showHistory ? "📦 Hide History" : "📜 Show History"} ({history.length})
         </button>
       </div>
@@ -187,7 +332,9 @@ export default function App() {
         <div className="history-panel">
           <div className="history-header">
             <h2>Password History</h2>
-            <button className="clear-btn" onClick={clearHistory}>Clear All</button>
+            <button className="clear-btn" onClick={clearHistory}>
+              🗑️ Clear All
+            </button>
           </div>
           
           {history.length === 0 ? (
@@ -195,24 +342,38 @@ export default function App() {
           ) : (
             <div className="history-list">
               {history.map((item) => (
-                <div key={item.id} className="history-item">
+                <div key={item._id} className="history-item">
                   <div className="history-main">
                     <span className="history-password">{item.password}</span>
-                    <button 
-                      className="history-copy" 
-                      onClick={() => copyToClipboard(item.password)}
-                      title="Copy password"
-                    >
-                      📋
-                    </button>
+                    <div className="history-actions">
+                      <button 
+                        className="history-copy" 
+                        onClick={() => copyToClipboard(item.password)}
+                        title="Copy password"
+                      >
+                        📋
+                      </button>
+                      <button 
+                        className="history-delete" 
+                        onClick={() => deletePassword(item._id)}
+                        title="Delete password"
+                      >
+                        🗑️
+                      </button>
+                    </div>
                   </div>
                   <div className="history-meta">
                     <span className={`history-strength ${item.strength.toLowerCase()}`}>
                       {item.strength}
                     </span>
-                    <span className="history-time">{item.timestamp}</span>
+                    <span className="history-time">
+                      {new Date(item.createdAt).toLocaleString()}
+                    </span>
                     <span className="history-response">
-                      ⚡ {item.responseTime}ms
+                      ⚡ {item.responseTime.toFixed(2)}ms
+                    </span>
+                    <span className="history-length">
+                      📏 {item.length} chars
                     </span>
                   </div>
                 </div>
